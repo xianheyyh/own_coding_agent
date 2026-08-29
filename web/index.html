@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>编程智能体</title>
+    <script>
+      try {
+        var t = localStorage.getItem("ca-theme");
+        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@vscode/codicons@0.0.36/dist/codicon.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=16" />
+  </head>
+  <body>
+    <header class="titlebar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <span>编程智能体</span>
+      </div>
+      <div class="workspace" id="workspaceLabel" title="当前工作区">工作区</div>
+      <div class="title-actions">
+        <button type="button" class="icon-btn" id="btnTheme" title="切换主题">
+          <i class="codicon codicon-color-mode" id="themeIcon"></i>
+        </button>
+        <button type="button" class="icon-btn" id="btnBrowse" title="打开文件夹">
+          <i class="codicon codicon-folder-opened"></i>
+        </button>
+        <button type="button" class="icon-btn" id="btnFiles" title="文件树">
+          <i class="codicon codicon-files"></i>
+        </button>
+        <button type="button" class="icon-btn" id="btnTermToggle" title="终端 (Ctrl+`)">
+          <i class="codicon codicon-terminal"></i>
+        </button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="threads">
+        <div class="pane-title">
+          <span>聊天</span>
+          <button type="button" class="text-btn" id="btnNew" title="在当前工作区新开对话">
+            <i class="codicon codicon-add"></i> 新建
+          </button>
+        </div>
+        <div class="conv-list" id="convList">
+          <div class="ws-empty">正在加载对话…</div>
+        </div>
+      </aside>
+
+      <section class="chat">
+        <div class="chat-stream">
+          <div class="chat-empty" id="chatEmpty">
+            <div class="empty-mark">✦</div>
+            <h2>有什么可以帮你写的？</h2>
+            <p>描述任务。未做完的工作直接说「继续」。</p>
+            <div class="empty-chips">
+              <button type="button" class="chip" data-prompt="解释 shop/cart.py 在做什么">解释 cart.py</button>
+              <button type="button" class="chip" data-prompt="补全购物车：从目录加商品、按数量计算小计、实现满减优惠（满 50 减 5、满 100 减 15，取最高一档）。不要修改 tests 目录。运行 python -m pytest 直到全部通过。">修购物车并跑测试</button>
+              <button type="button" class="chip" data-prompt="继续">继续未完成的任务</button>
+            </div>
+          </div>
+          <div class="log" id="log"></div>
+        </div>
+        <section class="term-drawer collapsed" id="termPane">
+          <div class="pane-title">
+            <span><i class="codicon codicon-terminal"></i> 终端</span>
+            <button type="button" class="icon-btn" id="btnTermHide" title="隐藏终端">
+              <i class="codicon codicon-chevron-down"></i>
+            </button>
+          </div>
+          <pre class="term-out" id="termOut"></pre>
+          <div class="term-line">
+            <span class="prompt" id="termPrompt">&gt;</span>
+            <input id="termCmd" autocomplete="off" spellcheck="false" placeholder="在工作区根目录执行命令" />
+          </div>
+        </section>
+        <div class="run-bar hidden" id="runBar">
+          <span class="run-dot"></span>
+          <span id="runText">正在调用工具…</span>
+        </div>
+        <form class="composer" id="composer">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="给 Agent 下任务…"
+          ></textarea>
+          <div class="composer-bar">
+            <span class="composer-meta">
+              <i class="codicon codicon-folder"></i>
+              <span id="composerWs">工作区</span>
+              <span class="sep">·</span>
+              Agent
+            </span>
+            <span class="composer-hint">Enter 发送</span>
+            <button type="button" class="send-btn" id="btnSend" title="发送">
+              <i class="codicon codicon-send" id="sendIcon"></i>
+            </button>
+          </div>
+        </form>
+
+        <aside class="files-drawer" id="filesDrawer">
+          <div class="pane-title">
+            <span>文件</span>
+            <span class="icon-row">
+              <button type="button" class="icon-btn" id="btnNewFile" title="新建文件">
+                <i class="codicon codicon-new-file"></i>
+              </button>
+              <button type="button" class="icon-btn" id="btnNewFolder" title="新建文件夹">
+                <i class="codicon codicon-new-folder"></i>
+              </button>
+              <button type="button" class="icon-btn" id="btnCloseFiles" title="关闭">
+                <i class="codicon codicon-close"></i>
+              </button>
+            </span>
+          </div>
+          <div class="tree" id="tree"></div>
+        </aside>
+
+        <aside class="preview-drawer" id="previewDrawer">
+          <div class="tabs">
+            <div class="tab active">
+              <i class="codicon codicon-file" id="tabIcon"></i>
+              <span id="tabName">未打开文件</span>
+            </div>
+            <button type="button" class="icon-btn" id="btnSave" title="保存 (Ctrl+S)">
+              <i class="codicon codicon-save"></i>
+            </button>
+            <button type="button" class="icon-btn" id="btnClosePreview" title="关闭预览">
+              <i class="codicon codicon-close"></i>
+            </button>
+          </div>
+          <div class="editor-wrap">
+            <div class="editor-empty" id="editorEmpty">
+              <i class="codicon codicon-file"></i>
+              <p>点右侧改动或文件树中的文件以预览</p>
+            </div>
+            <div id="editor"></div>
+            <textarea id="editorFallback" class="hidden" spellcheck="false"></textarea>
+          </div>
+        </aside>
+      </section>
+
+      <aside class="changes">
+        <div class="pane-title">
+          <span>改动</span>
+          <span class="change-count" id="changeCount"></span>
+        </div>
+        <div class="change-empty" id="changeEmpty">Agent 改过的文件会出现在这里，点开可看历史并回退</div>
+        <div class="change-list" id="changeList"></div>
+      </aside>
+    </main>
+
+    <footer class="statusbar">
+      <span class="status-left">
+        <i class="codicon codicon-check" id="statusIcon"></i>
+        <span id="status">就绪</span>
+      </span>
+    </footer>
+
+    <div id="ctx" class="ctx hidden">
+      <button type="button" data-act="new-file"><i class="codicon codicon-new-file"></i> 新建文件</button>
+      <button type="button" data-act="new-folder"><i class="codicon codicon-new-folder"></i> 新建文件夹</button>
+      <button type="button" data-act="open"><i class="codicon codicon-go-to-file"></i> 打开</button>
+    </div>
+    <script src="/static/app.js?v=16"></script>
+  </body>
+</html>

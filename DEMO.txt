@@ -1,0 +1,40 @@
+演示脚本（约 2 分钟，可加速）
+
+准备
+1. conda activate agent
+2. cd coding-agent
+3. python demo_multi/prepare_demo.py
+4. python -m pytest demo_multi   （应有失败，可在终端里闪一下）
+5. python app.py                 （默认工作区就是 demo_multi）
+6. 点左侧「新建」开一个空对话
+
+口播任务（复制到输入框，或点空状态芯片「修购物车并跑测试」）
+
+补全购物车：从目录加商品、按数量计算小计、实现满减优惠（满 50 减 5、满 100 减 15，取最高一档）。不要修改 tests 目录。运行 python -m pytest 直到全部通过。
+
+画面上要让人看到
+- 它 list_dir / read_file 看 shop 和 tests
+- 改 cart.py（小计乘数量）和 discount.py（满减档位）
+- 右侧「改动」出现文件
+- run_shell 跑 python -m pytest，从失败到通过
+- 不要出现 API key、.env 内容
+
+口播一句（15 秒内）
+循环在 agent.py 自己写：模型 tool calling，本地 tools.py 读写文件和执行命令，结果写回对话，直到不再调工具。没有用 LangChain。记忆在工作区 .agent/ 目录，人可以打开看。
+
+收尾
+若练习时已经修好，再运行 python demo_multi/prepare_demo.py 即可重新失败，方便再录一遍。
+
+公开仓库（题目要求 GitHub 或 Gitee，须公开）
+1. 在 GitHub/Gitee 新建空的公开仓库（不要勾选自动加 README）
+2. 在 coding-agent 目录：
+
+git init -b main
+git add -A
+git status
+git commit -m "Initial commit: self-hosted coding agent."
+git remote add origin 你的仓库.git
+git push -u origin main
+
+3. 把仓库网页地址填进上一级目录 README.txt 第一行
+4. 将 README.txt 与视频压成「姓名.zip」提交
