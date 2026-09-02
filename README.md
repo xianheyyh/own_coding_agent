@@ -20,8 +20,6 @@ OPENAI_BASE_URL=https://api.deepseek.com
 OPENAI_MODEL=deepseek-v4-flash
 ```
 
-Anaconda 用户：`conda activate agent` 后同样改 `.env`。
-
 ## 运行
 
 桌面窗口（Codex 式：左对话历史、中聊天；右侧 Dock 按需打开。默认工作区 `demo_multi`）：
