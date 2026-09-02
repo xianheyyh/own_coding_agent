@@ -1,5 +1,6 @@
 from shop.catalog import get_product
 from shop.discount import coupon_off_cents
+from shop.tax import tax_cents
 
 
 class Cart:
@@ -15,9 +16,9 @@ class Cart:
     def subtotal_cents(self) -> int:
         total = 0
         for sku, qty in self._lines:
-            # 演示用缺陷：没乘数量。录视频前保持这样，让 pytest 失败。
             total += get_product(sku)["price_cents"]
         return total
 
     def total_cents(self) -> int:
-        return self.subtotal_cents() - coupon_off_cents(self.subtotal_cents())
+        net = self.subtotal_cents() - coupon_off_cents(self.subtotal_cents())
+        return net + tax_cents(net)

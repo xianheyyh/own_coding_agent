@@ -21,20 +21,25 @@ from memory import (
     files_from_tool,
     health_check,
 )
-from tools import TOOL_SCHEMAS, Workspace, dispatch
+from tools import TOOL_SCHEMAS, TaskTodos, Workspace, dispatch
 
 SYSTEM_PROMPT = """你是一个在本地工作区里完成编程任务的助手。
 工作区根目录是用户指定的文件夹，所有路径都必须相对这个根目录。
 
+【语言，最高优先级】对用户可见的所有自然语言必须用简体中文：包括开场说明、过程叙述、todo 每一步、结束总结。
+禁止用英文句子（例如 I'll、Let me、Running tests、I will、Looking at）。
+代码、命令、路径、pytest 日志保持英文原文，不要翻译测试输出。
+
 请遵循：
-1. 先用 list_dir / read_file 了解现状，再修改。
-2. 小改动用 edit_file（old 必须在文件中唯一），新建或整文件重写才用 write_file。
-3. 改完代码后用 run_shell 运行测试或相关命令；失败则根据输出继续改，直到成功或确认无法完成。
+1. 先用 glob / grep / list_dir 定位文件，再用 read_file 阅读。大文件用 offset（从 1 起的行号）和 limit 分段读。
+2. 小改动优先 apply_patch（带上下文的补丁）；对不齐再用 edit_file。新建或整文件重写才用 write_file。
+3. 超过两三步的任务先用 todo 列出步骤（content 用中文），开始或完成某一步就更新 status。
+4. 改完代码后用 run_shell 运行测试或相关命令；失败则根据输出继续改，直到成功或确认无法完成。
    本机是 Windows，run_shell 走 cmd。用 python -m pytest、dir、type、findstr。
-   不要用 grep、ls、cat、find | head 或其它 Unix 管道。
-4. 不要编造看不到的文件内容。工具失败时根据错误信息调整，不要中止后空想。
-5. 任务完成后用简短中文说明你改了什么、如何验证。不要再调用工具。
-6. 用户不会点名工具。项目约定用 remember / update_memory / forget / recall：
+   不要用 Unix 的 grep/ls/cat/find；搜索请用本项目的 grep/glob 工具。
+5. 不要编造看不到的文件内容。工具失败时根据错误信息调整，不要中止后空想。
+6. 任务完成后用几句中文说明你改了什么、如何验证。不要再调用工具。
+7. 用户不会点名工具。项目约定用 remember / update_memory / forget / recall：
    - remember：新的长期约定（kind 为 env/command/constraint/decision）
    - update_memory：约定过时则废弃旧条并追加新条，不要假装覆盖
    - forget：用户明确说不用再遵守时，软废弃
@@ -62,6 +67,11 @@ def build_system(
         + recalled_text
         + "\n\n## 任务队列\n"
         + queue.format_for_prompt()
+        + "\n\n## 当前任务步骤\n"
+        + TaskTodos(workspace.root).format_for_prompt()
+        + "\n\n## 语言（本轮强制）\n"
+        "对用户说的话和 todo 必须用简体中文。不要写英文句子。"
+        "命令与 pytest 输出保持原文。"
     )
 
 
@@ -92,13 +102,16 @@ def compact_messages(messages: list[dict]) -> None:
             )
 
 
+_DEBUG_KINDS = {"recall", "queue", "step", "health", "thinking"}
+
+
 def _emit(
     on_event: Callable[[str, dict[str, Any]], None] | None,
     kind: str,
     payload: dict[str, Any],
     line: str | None = None,
 ) -> None:
-    if line is not None:
+    if line is not None and on_event is None and kind not in _DEBUG_KINDS:
         print(line)
     if on_event is not None:
         on_event(kind, payload)
@@ -127,6 +140,7 @@ def run_task(
     messages: list[dict] | None = None,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    model: str | None = None,
 ) -> str:
     if messages is None:
         messages = []
@@ -149,6 +163,8 @@ def run_task(
             _emit(on_event, "recall", {"ids": ""}, "情节自动召回: 无命中")
         qid = item.get("id") or "(询问)"
         _emit(on_event, "queue", {"mode": mode, "id": qid}, f"任务队列: {mode} {qid}")
+        if mode == "new":
+            TaskTodos(workspace.root).clear()
 
     refresh_system(workspace, messages, recalled_text)
     messages.append({"role": "user", "content": task})
@@ -164,8 +180,8 @@ def run_task(
             if _cancelled(cancel_check):
                 finished = False
                 outcome = "interrupted"
-                final_text = final_text or "已停止"
-                _emit(on_event, "error", {"text": "已停止"}, "已停止")
+                final_text = "已暂停"
+                _emit(on_event, "paused", {}, "已暂停")
                 break
             _emit(
                 on_event,
@@ -177,7 +193,8 @@ def run_task(
             compact_messages(messages)
 
             def on_text(piece: str) -> None:
-                print(piece, end="", flush=True)
+                if on_event is None:
+                    print(piece, end="", flush=True)
                 _emit(on_event, "delta", {"text": piece})
 
             thinking_noted = False
@@ -196,13 +213,15 @@ def run_task(
                 on_text=on_text,
                 on_thinking=on_thinking,
                 cancel_check=cancel_check,
+                model=model,
             )
-            print("", flush=True)
+            if on_event is None:
+                print("", flush=True)
             if _cancelled(cancel_check):
                 finished = False
                 outcome = "interrupted"
-                final_text = final_text or "已停止"
-                _emit(on_event, "error", {"text": "已停止"}, "已停止")
+                final_text = "已暂停"
+                _emit(on_event, "paused", {}, "已暂停")
                 break
 
             if not resp.wants_tools:
@@ -240,8 +259,8 @@ def run_task(
             if stopped:
                 finished = False
                 outcome = "interrupted"
-                final_text = final_text or "已停止"
-                _emit(on_event, "error", {"text": "已停止"}, "已停止")
+                final_text = "已暂停"
+                _emit(on_event, "paused", {}, "已暂停")
                 break
         else:
             final_text = f"已达到最大步数 {config.MAX_STEPS}，停止以免无限循环。"
@@ -258,6 +277,16 @@ def run_task(
             "\n检测到中断，任务队列仍会落盘。",
         )
         raise
+    except Exception as exc:
+        finished = False
+        if str(exc).strip() == "已停止" or _cancelled(cancel_check):
+            outcome = "interrupted"
+            final_text = "已暂停"
+            _emit(on_event, "paused", {}, "已暂停")
+        else:
+            outcome = "error"
+            final_text = str(exc) or final_text or "任务失败"
+            _emit(on_event, "error", {"text": final_text}, final_text)
     finally:
         if not smalltalk:
             queue.record(

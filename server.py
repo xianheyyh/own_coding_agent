@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import threading
 import uuid
 from pathlib import Path
@@ -14,29 +16,36 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import agent
+import config
 import llm
 from file_history import FileHistory
 from memory import (
+    STATE_DIR,
     ConversationStore,
     TaskQueue,
     grouped_conversation_payload,
+    forget_workspace,
+    list_known_workspaces,
     project_workspace,
     remember_workspace,
     reorder_workspaces,
     save_session,
 )
-from tools import Workspace
+from tools import Workspace, patch_file_paths
 
 SKIP_DIRS = {
     ".git",
+    ".svn",
+    ".hg",
     "__pycache__",
     ".venv",
     "venv",
     "node_modules",
     ".pytest_cache",
     ".mypy_cache",
+    ".agent",
 }
-SKIP_FILES = {".DS_Store"}
+SKIP_FILES = {".DS_Store", ".env"}
 MAX_TREE_DEPTH = 8
 MAX_PREVIEW_BYTES = 800_000
 
@@ -60,6 +69,8 @@ _workspace = Path(".").resolve()
 _messages: list[dict[str, Any]] = []
 _client = None
 _jobs: dict[str, dict[str, Any]] = {}
+SETTINGS_JSON = STATE_DIR / "settings.json"
+_model = config.MODEL
 
 
 class ChatReq(BaseModel):
@@ -68,6 +79,10 @@ class ChatReq(BaseModel):
 
 class WorkspaceReq(BaseModel):
     path: str
+
+
+class ModelReq(BaseModel):
+    model: str
 
 
 class PathReq(BaseModel):
@@ -83,7 +98,16 @@ class ShellReq(BaseModel):
     command: str
 
 
+class CreateConvReq(BaseModel):
+    workspace: str | None = None
+
+
 class SelectConvReq(BaseModel):
+    id: str
+    workspace: str | None = None
+
+
+class DeleteConvReq(BaseModel):
     id: str
     workspace: str | None = None
 
@@ -95,6 +119,10 @@ class ReorderConvReq(BaseModel):
 
 class ReorderWsReq(BaseModel):
     paths: list[str]
+
+
+class ForgetWsReq(BaseModel):
+    path: str
 
 
 class RestoreHistReq(BaseModel):
@@ -160,6 +188,35 @@ def _build_tree(path: Path, rel: str, depth: int) -> dict[str, Any] | None:
     return {"name": name, "path": rel, "dir": False}
 
 
+def _clipboard_text() -> str:
+    if os.name != "nt":
+        return ""
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    if not user32.OpenClipboard(None):
+        return ""
+    try:
+        handle = user32.GetClipboardData(13)
+        if not handle:
+            return ""
+        locked = kernel32.GlobalLock(handle)
+        if not locked:
+            return ""
+        try:
+            return ctypes.wstring_at(locked)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+@app.get("/api/clipboard")
+def get_clipboard() -> dict[str, str]:
+    return {"text": _clipboard_text()}
+
+
 @app.get("/api/workspace")
 def get_workspace() -> dict[str, Any]:
     opened = TaskQueue(_workspace).open_items()
@@ -168,13 +225,45 @@ def get_workspace() -> dict[str, Any]:
         "name": _workspace.name,
         "busy": _busy,
         "open_tasks": len(opened),
+        "model": _model,
     }
 
 
-@app.post("/api/workspace")
-def set_workspace(req: WorkspaceReq) -> dict[str, Any]:
+def _load_ui_settings() -> None:
+    global _model
+    if not SETTINGS_JSON.is_file():
+        return
+    try:
+        data = json.loads(SETTINGS_JSON.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    raw = data.get("model") if isinstance(data, dict) else None
+    if not isinstance(raw, str):
+        return
+    try:
+        _model = config.normalize_model(raw)
+    except ValueError:
+        return
+
+
+def _save_ui_settings() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    SETTINGS_JSON.write_text(
+        json.dumps({"model": _model}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def model_payload() -> dict[str, Any]:
+    models = config.list_models()
+    if _model not in models:
+        models = [_model, *models]
+    return {"model": _model, "models": models}
+
+
+def _switch_workspace(target: Path) -> dict[str, Any]:
     global _workspace, _messages
-    target = project_workspace(req.path)
+    target = project_workspace(target)
     if not target.is_dir():
         raise HTTPException(400, "工作区必须是已存在的目录")
     with _lock:
@@ -187,6 +276,31 @@ def set_workspace(req: WorkspaceReq) -> dict[str, Any]:
     return get_workspace()
 
 
+@app.post("/api/workspace")
+def set_workspace(req: WorkspaceReq) -> dict[str, Any]:
+    return _switch_workspace(Path(req.path))
+
+
+@app.get("/api/model")
+def get_model() -> dict[str, Any]:
+    return model_payload()
+
+
+@app.post("/api/model")
+def set_model(req: ModelReq) -> dict[str, Any]:
+    global _model
+    try:
+        name = config.normalize_model(req.model)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    with _lock:
+        if _busy:
+            raise HTTPException(409, "任务进行中，先等当前任务结束再换模型")
+        _model = name
+        _save_ui_settings()
+    return model_payload()
+
+
 @app.get("/api/tree")
 def get_tree() -> dict[str, Any]:
     root = _build_tree(_workspace, "", 0)
@@ -194,6 +308,28 @@ def get_tree() -> dict[str, Any]:
         raise HTTPException(500, "无法读取工作区")
     root["name"] = _workspace.name
     return root
+
+
+@app.get("/api/ls")
+def list_dir_entries(path: str = "") -> dict[str, Any]:
+    rel = (path or "").replace("\\", "/").strip("/")
+    ws = _ws()
+    try:
+        target = ws.resolve(rel or ".")
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    if not target.is_dir():
+        raise HTTPException(404, "目录不存在")
+    items: list[dict[str, Any]] = []
+    try:
+        entries = sorted(target.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        entries = []
+    for child in entries:
+        if child.name in SKIP_DIRS or child.name in SKIP_FILES:
+            continue
+        items.append({"name": child.name, "dir": child.is_dir()})
+    return {"path": rel, "items": items}
 
 
 @app.get("/api/file")
@@ -226,6 +362,41 @@ def list_file_history() -> dict[str, Any]:
 def list_file_versions(path: str = Query(..., min_length=1)) -> dict[str, Any]:
     rel = _rel_path(path)
     return {"path": rel, "items": FileHistory(_workspace).list_versions(rel)}
+
+
+@app.get("/api/history/diff")
+def file_history_diff(path: str = Query(..., min_length=1)) -> dict[str, Any]:
+    rel = _rel_path(path)
+    hist = FileHistory(_workspace)
+    items = hist.list_versions(rel)
+    before = ""
+    created = True
+    if items:
+        try:
+            before, missing = hist.read_version(rel, str(items[0].get("id") or ""))
+            created = bool(missing)
+        except KeyError:
+            before = ""
+            created = True
+    after = ""
+    deleted = False
+    ws = _ws()
+    try:
+        target = ws.resolve(rel)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    if target.is_file():
+        if target.stat().st_size <= MAX_PREVIEW_BYTES:
+            after = target.read_text(encoding="utf-8", errors="replace")
+    else:
+        deleted = True
+    return {
+        "path": rel,
+        "before": before,
+        "after": after,
+        "created": created,
+        "deleted": deleted,
+    }
 
 
 @app.get("/api/history/content")
@@ -296,6 +467,25 @@ def new_folder(req: PathReq) -> dict[str, str]:
     return {"path": rel}
 
 
+@app.post("/api/delete")
+def delete_path(req: PathReq) -> dict[str, str]:
+    rel = _rel_path(req.path)
+    ws = _ws()
+    target = _writable(ws, rel)
+    if target == ws.root:
+        raise HTTPException(400, "不能删除工作区根目录")
+    if not target.exists():
+        raise HTTPException(404, "路径不存在")
+    FileHistory(_workspace).snapshot_before(rel, "delete")
+    if target.is_file():
+        target.unlink()
+    elif target.is_dir():
+        shutil.rmtree(target)
+    else:
+        raise HTTPException(400, "无法删除")
+    return {"path": rel}
+
+
 @app.post("/api/shell")
 def run_shell(req: ShellReq) -> dict[str, str]:
     command = req.command.strip()
@@ -326,13 +516,25 @@ def list_conversations() -> dict[str, Any]:
 
 
 @app.post("/api/conversations")
-def create_conversation() -> dict[str, Any]:
-    global _messages
+def create_conversation(req: CreateConvReq | None = None) -> dict[str, Any]:
+    global _workspace, _messages
+    changed = False
+    workspace = req.workspace if req else None
     with _lock:
         if _busy:
             raise HTTPException(409, "任务进行中")
+        if workspace:
+            target = project_workspace(workspace)
+            if not target.is_dir():
+                raise HTTPException(400, "工作区不存在")
+            if target != _workspace:
+                ConversationStore(_workspace).save(_messages)
+                _workspace = target
+                remember_workspace(_workspace)
+                _messages = ConversationStore(_workspace).load_active()
+                changed = True
         _messages = _store().create(_messages)
-    return _conv_state()
+    return _conv_state(changed)
 
 
 def _select_conversation(cid: str, workspace: str | None) -> dict[str, Any]:
@@ -363,6 +565,30 @@ def select_conversation_body(req: SelectConvReq) -> dict[str, Any]:
     return _select_conversation(req.id, req.workspace)
 
 
+@app.post("/api/conversations/delete")
+def delete_conversation(req: DeleteConvReq) -> dict[str, Any]:
+    global _workspace, _messages
+    changed = False
+    with _lock:
+        if _busy:
+            raise HTTPException(409, "任务进行中")
+        if req.workspace:
+            target = project_workspace(req.workspace)
+            if not target.is_dir():
+                raise HTTPException(400, "工作区不存在")
+            if target != _workspace:
+                ConversationStore(_workspace).save(_messages)
+                _workspace = target
+                remember_workspace(_workspace)
+                _messages = ConversationStore(_workspace).load_active()
+                changed = True
+        try:
+            _messages = _store().delete(req.id, _messages)
+        except KeyError:
+            raise HTTPException(404, "对话不存在") from None
+    return _conv_state(changed)
+
+
 @app.post("/api/conversations/reorder")
 def reorder_conversations(req: ReorderConvReq) -> dict[str, Any]:
     target = project_workspace(req.workspace) if req.workspace else _workspace
@@ -378,6 +604,28 @@ def reorder_workspace_list(req: ReorderWsReq) -> dict[str, Any]:
     with _lock:
         reorder_workspaces(req.paths)
     return _conv_state()
+
+
+@app.post("/api/workspaces/delete")
+def delete_workspace_item(req: ForgetWsReq) -> dict[str, Any]:
+    global _workspace, _messages
+    target = project_workspace(req.path)
+    changed = False
+    with _lock:
+        if _busy:
+            raise HTTPException(409, "任务进行中")
+        remaining = [p for p in list_known_workspaces(_workspace) if p != target]
+        if not remaining:
+            raise HTTPException(400, "至少保留一个工作区")
+        if target == _workspace:
+            nxt = remaining[0]
+            ConversationStore(_workspace).save(_messages)
+            _workspace = nxt
+            remember_workspace(_workspace)
+            _messages = ConversationStore(_workspace).load_active()
+            changed = True
+        forget_workspace(target)
+    return _conv_state(changed)
 
 
 @app.post("/api/conversations/{cid}/select")
@@ -427,6 +675,7 @@ def start_chat_job(task: str) -> dict[str, str]:
 
     ws = _ws()
     history = _messages
+    chosen = _model
 
     def push(kind: str, payload: dict[str, Any]) -> None:
         with _lock:
@@ -436,18 +685,28 @@ def start_chat_job(task: str) -> dict[str, str]:
         push(kind, payload)
         if kind != "tool":
             return
-        if payload.get("name") not in ("read_file", "write_file", "edit_file"):
+        if payload.get("name") not in ("read_file", "write_file", "edit_file", "apply_patch"):
             return
         try:
             args = json.loads(payload.get("arguments") or "{}")
         except json.JSONDecodeError:
             return
+        paths: list[str] = []
         path = args.get("path")
         if isinstance(path, str) and path.strip():
-            push("open_file", {"path": path.strip(), "reason": payload.get("name")})
+            paths.append(path.strip())
+        if payload.get("name") == "apply_patch":
+            paths.extend(patch_file_paths(str(args.get("patch") or "")))
+        seen: set[str] = set()
+        for rel in paths:
+            if rel in seen:
+                continue
+            seen.add(rel)
+            push("open_file", {"path": rel, "reason": payload.get("name")})
 
     def worker() -> None:
         global _busy, _messages, _client
+        snap = len(history)
         try:
             if _client is None:
                 _client = llm.make_client()
@@ -458,7 +717,11 @@ def start_chat_job(task: str) -> dict[str, str]:
                 history,
                 on_event=on_event,
                 cancel_check=lambda: _cancel,
+                model=chosen,
             )
+            paused = any(ev.get("kind") == "paused" for ev in job["events"])
+            if paused and 0 <= snap <= len(history):
+                del history[snap:]
             save_session(ws.root, history)
             _messages = history
         except Exception as exc:
@@ -524,6 +787,7 @@ app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 def init_workspace(path: Path) -> None:
     global _workspace, _messages
+    _load_ui_settings()
     _workspace = project_workspace(path.resolve())
     remember_workspace(_workspace)
     _messages = ConversationStore(_workspace).load_active()

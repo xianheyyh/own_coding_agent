@@ -1,6 +1,6 @@
 PRODUCTS = {
-    "A100": {"name": "notebook", "price_cents": 10000},
-    "B200": {"name": "mouse", "price_cents": 2000},
+    "A100": {"name": "notebook", "price_cents": 10000, "stock": 3},
+    "B200": {"name": "mouse", "price_cents": 2000, "stock": 2},
 }
 
 

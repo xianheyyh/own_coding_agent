@@ -22,6 +22,28 @@ TITLE_MAX = 32
 
 KINDS = ("env", "command", "constraint", "decision")
 
+_WEAK_SHARED = {
+    "python",
+    "java",
+    "javascript",
+    "typescript",
+    "code",
+    "test",
+    "file",
+    "http",
+    "json",
+    "data",
+    "html",
+    "css",
+    "demo",
+    "shop",
+    "cart",
+    "true",
+    "false",
+    "windows",
+    "linux",
+}
+
 _STOP = {
     "这个", "那个", "一个", "我们", "你们", "什么", "怎么", "怎样", "如果",
     "可以", "不要", "不是", "没有", "以及", "或者", "还有", "进行", "使用",
@@ -77,6 +99,10 @@ def files_from_tool(name: str, arguments: str) -> list[str]:
         "list_dir",
     }:
         return [path.strip()]
+    if name == "apply_patch":
+        from tools import patch_file_paths
+
+        return patch_file_paths(str(args.get("patch") or ""))
     return []
 
 
@@ -282,6 +308,20 @@ class ProjectMemory:
                 continue
             shared = tokens & tokenize(e.get("fact", ""))
             if len(shared) >= 2:
+                hits.append(e)
+                continue
+            strong = any(
+                t not in _WEAK_SHARED
+                and (
+                    len(t) >= 5
+                    or any(ch.isdigit() for ch in t)
+                    or "." in t
+                    or "/" in t
+                    or "_" in t
+                )
+                for t in shared
+            )
+            if strong:
                 hits.append(e)
         return hits
 
@@ -541,7 +581,6 @@ class TaskQueue:
                 if loaded:
                     messages.clear()
                     messages.extend(loaded)
-                    print(f"已接上未完成任务 {target['id']}")
             return "resume", target
         data = self._load()
         tid = f"t{data['next_id']:03d}"
@@ -604,13 +643,18 @@ class TaskQueue:
                 row["summary"] = summary_one
                 row["outcome"] = outcome
                 row["updated"] = _now()
-                row["finished"] = finished
-                if finished:
-                    row["status"] = "done"
-                elif outcome in {"max_steps", "interrupted"}:
+                if outcome == "interrupted":
                     row["status"] = "interrupted"
+                    row["finished"] = True
+                elif finished:
+                    row["status"] = "done"
+                    row["finished"] = True
+                elif outcome in {"max_steps", "error"}:
+                    row["status"] = "interrupted"
+                    row["finished"] = False
                 else:
                     row["status"] = "in_progress"
+                    row["finished"] = False
                 break
         self._save(data)
 
@@ -927,6 +971,37 @@ class ConversationStore:
         data["items"] = next_items
         self._save_index(data)
 
+    def delete(self, cid: str, current: list[dict]) -> list[dict]:
+        data = self._load_index()
+        items = [row for row in (data.get("items") or []) if isinstance(row, dict)]
+        if not any(row.get("id") == cid for row in items):
+            raise KeyError(cid)
+        active = data.get("active_id")
+        if active and active != cid and has_user_message(current):
+            self.save(current, cid=active)
+            data = self._load_index()
+            items = [row for row in (data.get("items") or []) if isinstance(row, dict)]
+        keep = [row for row in items if row.get("id") != cid]
+        path = self._path_for(cid)
+        if path.is_file():
+            path.unlink()
+        if not keep:
+            nid = self._new_id(data)
+            self._write_messages(nid, [])
+            data["items"] = []
+            self._add_item(data, nid, "新对话")
+            data["active_id"] = nid
+            self._save_index(data)
+            _write_session_json(self.root, [])
+            return []
+        data["items"] = keep
+        if active == cid:
+            data["active_id"] = keep[-1]["id"]
+        self._save_index(data)
+        loaded = self._load_messages(data["active_id"])
+        _write_session_json(self.root, loaded)
+        return loaded
+
     def snapshot(self, messages: list[dict] | None = None) -> dict:
         payload = self.list_payload()
         payload["messages"] = (
@@ -1011,6 +1086,39 @@ def remember_workspace(path: str | Path) -> None:
     _save_workspace_index(data)
 
 
+def forget_workspace(path: str | Path) -> None:
+    """从侧栏列表拿掉，不删除磁盘上的文件夹。"""
+    try:
+        key = str(project_workspace(path))
+    except OSError:
+        key = str(Path(path))
+    data = _load_workspace_index()
+    items = []
+    seen: set[str] = set()
+    for row in data.get("items") or []:
+        raw = row.get("path") or ""
+        if not raw:
+            continue
+        try:
+            cleaned = project_workspace(raw)
+            ck = str(cleaned)
+        except OSError:
+            ck = raw
+            cleaned = None
+        if ck == key or ck in seen:
+            continue
+        seen.add(ck)
+        items.append(
+            {
+                "path": ck,
+                "name": cleaned.name if cleaned is not None else Path(ck).name,
+                "opened": row.get("opened") or _now(),
+            }
+        )
+    data["items"] = items
+    _save_workspace_index(data)
+
+
 def reorder_workspaces(paths: list[str]) -> None:
     data = _load_workspace_index()
     by_key: dict[str, dict] = {}
@@ -1048,7 +1156,6 @@ def reorder_workspaces(paths: list[str]) -> None:
 
 def list_known_workspaces(current: str | Path) -> list[Path]:
     current_root = project_workspace(current)
-    here = Path(__file__).resolve().parent
     ordered: list[Path] = []
     seen: set[str] = set()
 
@@ -1069,8 +1176,6 @@ def list_known_workspaces(current: str | Path) -> list[Path]:
         raw = row.get("path")
         if raw:
             add(Path(raw))
-    add(here / "demo_multi")
-    add(here / "demo")
     add(current_root)
     return ordered
 

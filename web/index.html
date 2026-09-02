@@ -7,31 +7,73 @@
     <script>
       try {
         var t = localStorage.getItem("ca-theme");
-        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+        document.documentElement.setAttribute("data-theme", t === "dark" ? "dark" : "light");
       } catch (e) {}
     </script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@vscode/codicons@0.0.36/dist/codicon.css" />
-    <link rel="stylesheet" href="/static/styles.css?v=16" />
+    <link rel="stylesheet" href="/static/styles.css?v=63" />
   </head>
   <body>
     <header class="titlebar">
-      <div class="brand">
-        <span class="logo" aria-hidden="true"></span>
-        <span>编程智能体</span>
-      </div>
+      <nav class="menubar" id="menubar">
+        <div class="menu">
+          <button type="button" class="menu-btn" data-menu="file">File</button>
+          <div class="menu-drop hidden" data-for="file">
+            <button type="button" data-cmd="new-conv">新建对话</button>
+            <button type="button" data-cmd="new-ws">新建工作区</button>
+            <div class="menu-sep"></div>
+            <button type="button" data-cmd="new-file">新建文件</button>
+            <button type="button" data-cmd="new-folder">新建文件夹</button>
+            <button type="button" data-cmd="save">保存<span class="menu-key">Ctrl+S</span></button>
+            <div class="menu-sep"></div>
+            <button type="button" data-cmd="view-files">打开文件</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button type="button" class="menu-btn" data-menu="edit">Edit</button>
+          <div class="menu-drop hidden" data-for="edit">
+            <button type="button" data-cmd="undo">撤销</button>
+            <button type="button" data-cmd="redo">重做</button>
+            <div class="menu-sep"></div>
+            <button type="button" data-cmd="cut">剪切</button>
+            <button type="button" data-cmd="copy">复制</button>
+            <button type="button" data-cmd="paste">粘贴</button>
+            <button type="button" data-cmd="select-all">全选</button>
+            <div class="menu-sep"></div>
+            <button type="button" data-cmd="delete">删除所选文件</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button type="button" class="menu-btn" data-menu="view">View</button>
+          <div class="menu-drop hidden" data-for="view">
+            <button type="button" data-cmd="theme">切换主题</button>
+            <div class="menu-sep"></div>
+            <button type="button" data-cmd="view-changes">改动</button>
+            <button type="button" data-cmd="view-files">文件</button>
+            <button type="button" data-cmd="view-term">终端</button>
+            <button type="button" data-cmd="view-browser">浏览器</button>
+            <div class="menu-sep"></div>
+            <button type="button" data-cmd="close-preview">关闭预览</button>
+            <button type="button" data-cmd="close-panel">关闭右侧面板</button>
+          </div>
+        </div>
+      </nav>
       <div class="workspace" id="workspaceLabel" title="当前工作区">工作区</div>
       <div class="title-actions">
         <button type="button" class="icon-btn" id="btnTheme" title="切换主题">
           <i class="codicon codicon-color-mode" id="themeIcon"></i>
         </button>
-        <button type="button" class="icon-btn" id="btnBrowse" title="打开文件夹">
-          <i class="codicon codicon-folder-opened"></i>
+        <button type="button" class="icon-btn" id="btnChanges" title="打开改动">
+          <i class="codicon codicon-request-changes"></i>
         </button>
-        <button type="button" class="icon-btn" id="btnFiles" title="文件树">
+        <button type="button" class="icon-btn" id="btnFiles" title="打开文件">
           <i class="codicon codicon-files"></i>
         </button>
-        <button type="button" class="icon-btn" id="btnTermToggle" title="终端 (Ctrl+`)">
+        <button type="button" class="icon-btn" id="btnTermToggle" title="新建终端 (Ctrl+`)">
           <i class="codicon codicon-terminal"></i>
+        </button>
+        <button type="button" class="icon-btn" id="btnBrowser" title="打开浏览器">
+          <i class="codicon codicon-globe"></i>
         </button>
       </div>
     </header>
@@ -47,6 +89,10 @@
         <div class="conv-list" id="convList">
           <div class="ws-empty">正在加载对话…</div>
         </div>
+        <button type="button" class="ws-create" id="btnNewWs" title="选择一个文件夹作为工作区">
+          <i class="codicon codicon-new-folder"></i>
+          新建工作区
+        </button>
       </aside>
 
       <section class="chat">
@@ -54,28 +100,14 @@
           <div class="chat-empty" id="chatEmpty">
             <div class="empty-mark">✦</div>
             <h2>有什么可以帮你写的？</h2>
-            <p>描述任务。未做完的工作直接说「继续」。</p>
             <div class="empty-chips">
-              <button type="button" class="chip" data-prompt="解释 shop/cart.py 在做什么">解释 cart.py</button>
-              <button type="button" class="chip" data-prompt="补全购物车：从目录加商品、按数量计算小计、实现满减优惠（满 50 减 5、满 100 减 15，取最高一档）。不要修改 tests 目录。运行 python -m pytest 直到全部通过。">修购物车并跑测试</button>
-              <button type="button" class="chip" data-prompt="继续">继续未完成的任务</button>
+              <button type="button" class="chip" data-prompt="先摸清当前工作区：列出目录和主要文件，用中文说明这是什么项目、测试怎么跑。先不要改代码。">了解这个项目</button>
+              <button type="button" class="chip" data-prompt="用中文说明你在做什么。运行测试，根据失败信息修改代码直到全部通过。不要修改 tests 目录。">跑测试并修好</button>
+              <button type="button" class="chip" data-prompt="继续上次没做完的任务。先看任务队列和未完成步骤，接着做，不要从头重来。">继续上次任务</button>
             </div>
           </div>
           <div class="log" id="log"></div>
         </div>
-        <section class="term-drawer collapsed" id="termPane">
-          <div class="pane-title">
-            <span><i class="codicon codicon-terminal"></i> 终端</span>
-            <button type="button" class="icon-btn" id="btnTermHide" title="隐藏终端">
-              <i class="codicon codicon-chevron-down"></i>
-            </button>
-          </div>
-          <pre class="term-out" id="termOut"></pre>
-          <div class="term-line">
-            <span class="prompt" id="termPrompt">&gt;</span>
-            <input id="termCmd" autocomplete="off" spellcheck="false" placeholder="在工作区根目录执行命令" />
-          </div>
-        </section>
         <div class="run-bar hidden" id="runBar">
           <span class="run-dot"></span>
           <span id="runText">正在调用工具…</span>
@@ -91,7 +123,13 @@
               <i class="codicon codicon-folder"></i>
               <span id="composerWs">工作区</span>
               <span class="sep">·</span>
-              Agent
+              <div class="model-picker" id="modelPicker">
+                <button type="button" class="model-btn" id="modelBtn" title="选择模型">
+                  <span id="modelLabel">模型</span>
+                  <i class="codicon codicon-chevron-up"></i>
+                </button>
+                <div class="model-menu hidden" id="modelMenu" role="listbox"></div>
+              </div>
             </span>
             <span class="composer-hint">Enter 发送</span>
             <button type="button" class="send-btn" id="btnSend" title="发送">
@@ -100,25 +138,8 @@
           </div>
         </form>
 
-        <aside class="files-drawer" id="filesDrawer">
-          <div class="pane-title">
-            <span>文件</span>
-            <span class="icon-row">
-              <button type="button" class="icon-btn" id="btnNewFile" title="新建文件">
-                <i class="codicon codicon-new-file"></i>
-              </button>
-              <button type="button" class="icon-btn" id="btnNewFolder" title="新建文件夹">
-                <i class="codicon codicon-new-folder"></i>
-              </button>
-              <button type="button" class="icon-btn" id="btnCloseFiles" title="关闭">
-                <i class="codicon codicon-close"></i>
-              </button>
-            </span>
-          </div>
-          <div class="tree" id="tree"></div>
-        </aside>
-
         <aside class="preview-drawer" id="previewDrawer">
+          <div class="preview-resize" id="previewResize" title="拖动调整宽度"></div>
           <div class="tabs">
             <div class="tab active">
               <i class="codicon codicon-file" id="tabIcon"></i>
@@ -134,21 +155,94 @@
           <div class="editor-wrap">
             <div class="editor-empty" id="editorEmpty">
               <i class="codicon codicon-file"></i>
-              <p>点右侧改动或文件树中的文件以预览</p>
+              <p>Agent 的改动会以 +/- 显示在这里</p>
             </div>
             <div id="editor"></div>
             <textarea id="editorFallback" class="hidden" spellcheck="false"></textarea>
+            <div id="editorDiff" class="editor-diff hidden"></div>
           </div>
         </aside>
       </section>
 
-      <aside class="changes">
-        <div class="pane-title">
-          <span>改动</span>
-          <span class="change-count" id="changeCount"></span>
+      <aside class="dock is-closed" id="dock">
+        <div class="dock-resize" id="dockResize" title="拖动调整宽度"></div>
+        <div class="dock-tabs">
+          <button type="button" class="dock-tab hidden" data-dock="changes" id="tabChanges">
+            改动 <span class="change-count" id="changeCount"></span>
+            <span class="dock-tab-close" data-close="changes" title="关闭">×</span>
+          </button>
+          <button type="button" class="dock-tab hidden" data-dock="files" id="tabFiles">
+            文件 <span class="dock-tab-close" data-close="files" title="关闭">×</span>
+          </button>
+          <button type="button" class="dock-tab hidden" data-dock="term" id="tabTerm">
+            终端 <span class="dock-tab-close" data-close="term" title="关闭">×</span>
+          </button>
+          <button type="button" class="dock-tab hidden" data-dock="browser" id="tabBrowser">
+            浏览器 <span class="dock-tab-close" data-close="browser" title="关闭">×</span>
+          </button>
         </div>
-        <div class="change-empty" id="changeEmpty">Agent 改过的文件会出现在这里，点开可看历史并回退</div>
-        <div class="change-list" id="changeList"></div>
+        <div class="dock-body">
+          <div class="dock-panel" id="dockChanges" data-dock="changes">
+            <div class="dock-panel-bar" id="dockChangeTools">
+              <button type="button" class="icon-btn" id="btnNewFileChange" title="新建文件">
+                <i class="codicon codicon-new-file"></i>
+              </button>
+              <button type="button" class="icon-btn" id="btnNewFolderChange" title="新建文件夹">
+                <i class="codicon codicon-new-folder"></i>
+              </button>
+              <button type="button" class="icon-btn" id="btnDeleteChange" title="删除所选">
+                <i class="codicon codicon-trash"></i>
+              </button>
+            </div>
+            <div class="change-empty" id="changeEmpty">改过的文件会出现在这里，点开后差异在中间预览里</div>
+            <div class="change-list" id="changeList"></div>
+          </div>
+          <div class="dock-panel" id="filesDrawer" data-dock="files">
+            <div class="dock-panel-bar" id="dockFileTools">
+              <button type="button" class="icon-btn" id="btnNewFile" title="新建文件">
+                <i class="codicon codicon-new-file"></i>
+              </button>
+              <button type="button" class="icon-btn" id="btnNewFolder" title="新建文件夹">
+                <i class="codicon codicon-new-folder"></i>
+              </button>
+              <button type="button" class="icon-btn" id="btnDeletePath" title="删除所选">
+                <i class="codicon codicon-trash"></i>
+              </button>
+            </div>
+            <div class="tree" id="tree"></div>
+          </div>
+          <div class="dock-panel" id="termPane" data-dock="term">
+            <div class="term-sess-bar">
+              <div class="term-sess-list" id="termSessList"></div>
+              <button type="button" class="icon-btn" id="btnNewTerm" title="新建终端">
+                <i class="codicon codicon-add"></i>
+              </button>
+            </div>
+            <div class="term-scroll" id="termScroll">
+              <pre class="term-out" id="termOut"></pre>
+              <div class="term-line">
+                <span class="prompt" id="termPrompt">&gt;</span>
+                <input id="termCmd" autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
+          </div>
+          <div class="dock-panel" id="browserPane" data-dock="browser">
+            <div class="browser-bar">
+              <button type="button" class="icon-btn" id="btnBrowserBack" title="后退">
+                <i class="codicon codicon-arrow-left"></i>
+              </button>
+              <button type="button" class="icon-btn" id="btnBrowserFwd" title="前进">
+                <i class="codicon codicon-arrow-right"></i>
+              </button>
+              <button type="button" class="icon-btn" id="btnBrowserReload" title="刷新">
+                <i class="codicon codicon-refresh"></i>
+              </button>
+              <input id="browserUrl" type="text" spellcheck="false" placeholder="输入网址，回车打开" />
+            </div>
+            <div class="browser-empty" id="browserEmpty">输入网址后回车</div>
+            <iframe id="browserFrame" class="hidden" title="浏览器" referrerpolicy="no-referrer"></iframe>
+          </div>
+        </div>
       </aside>
     </main>
 
@@ -162,8 +256,24 @@
     <div id="ctx" class="ctx hidden">
       <button type="button" data-act="new-file"><i class="codicon codicon-new-file"></i> 新建文件</button>
       <button type="button" data-act="new-folder"><i class="codicon codicon-new-folder"></i> 新建文件夹</button>
+      <button type="button" data-act="delete"><i class="codicon codicon-trash"></i> 删除</button>
       <button type="button" data-act="open"><i class="codicon codicon-go-to-file"></i> 打开</button>
     </div>
-    <script src="/static/app.js?v=16"></script>
+    <div id="termCtx" class="ctx hidden">
+      <button type="button" data-term-act="copy"><i class="codicon codicon-copy"></i> 复制</button>
+      <button type="button" data-term-act="paste"><i class="codicon codicon-copy"></i> 粘贴</button>
+    </div>
+    <div id="dlg" class="dlg hidden">
+      <div class="dlg-card" role="dialog" aria-modal="true">
+        <div class="dlg-title" id="dlgTitle">确认</div>
+        <div class="dlg-msg" id="dlgMsg"></div>
+        <input id="dlgInput" class="dlg-input hidden" type="text" spellcheck="false" autocomplete="off" />
+        <div class="dlg-actions">
+          <button type="button" class="dlg-btn" id="dlgCancel">取消</button>
+          <button type="button" class="dlg-btn dlg-ok" id="dlgOk">确定</button>
+        </div>
+      </div>
+    </div>
+    <script src="/static/app.js?v=62"></script>
   </body>
 </html>

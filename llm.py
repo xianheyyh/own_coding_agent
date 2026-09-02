@@ -34,25 +34,85 @@ class LLMResponse:
         return bool(self.tool_calls)
 
 
+def http_timeout():
+    """连接/读/写都跟 AGENT_LLM_TIMEOUT 走，避免 read=25s 把 90s 配置架空。"""
+    total = float(config.LLM_TIMEOUT)
+    try:
+        from httpx import Timeout
+
+        return Timeout(total, connect=min(10.0, total), read=total, write=total)
+    except Exception:
+        return total
+
+
 def make_client() -> OpenAI:
     if not config.API_KEY:
         raise RuntimeError(
             "未设置 OPENAI_API_KEY。请复制 .env.example 为 .env 并填入密钥。"
         )
-    try:
-        from httpx import Timeout
-
-        timeout: object = Timeout(config.LLM_TIMEOUT, connect=10.0, read=25.0)
-    except Exception:
-        timeout = config.LLM_TIMEOUT
     kwargs: dict = {
         "api_key": config.API_KEY,
-        "timeout": timeout,
-        "max_retries": config.LLM_MAX_RETRIES,
+        "timeout": http_timeout(),
+        # 流式失败由 chat() 整轮重试，避免 SDK 与应用层叠加重试。
+        "max_retries": 0,
     }
     if config.BASE_URL:
         kwargs["base_url"] = config.BASE_URL
     return OpenAI(**kwargs)
+
+
+def is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, RuntimeError) and str(exc).strip() == "已停止":
+        return False
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    name = type(exc).__name__
+    text = str(exc)
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        try:
+            code = int(status)
+        except (TypeError, ValueError):
+            code = None
+        if code is not None:
+            return code in {408, 409, 429} or code >= 500
+    if "APIStatus" in name:
+        return any(s in text for s in ("429", " 500", "502", "503", "504", "408"))
+    if any(key in name for key in ("Timeout", "APIConnection", "RateLimit")):
+        return True
+    if "超时" in text or "连不上模型" in text:
+        return True
+    if "Error code: 429" in text or "status code 429" in text.lower():
+        return True
+    return False
+
+
+def call_with_retries(
+    fn: Callable,
+    *,
+    retries: int | None = None,
+    sleep: Callable[[float], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+):
+    """可恢复错误整轮重试。retries 为失败后再试的次数。"""
+    tries = config.LLM_MAX_RETRIES if retries is None else retries
+    pause = time.sleep if sleep is None else sleep
+    last: BaseException | None = None
+    for attempt in range(tries + 1):
+        if cancel_check and cancel_check():
+            raise RuntimeError("已停止")
+        try:
+            return fn()
+        except Exception as exc:
+            last = exc
+            if cancel_check and cancel_check():
+                raise RuntimeError("已停止") from exc
+            if not is_retryable(exc) or attempt >= tries:
+                raise
+            delay = min(config.LLM_RETRY_BASE * (2**attempt), 4.0)
+            pause(delay)
+    assert last is not None
+    raise last
 
 
 _active_stream = None
@@ -65,7 +125,6 @@ def abort_active_stream() -> None:
         stream = _active_stream
     if stream is None:
         return
-    print("中断模型请求", flush=True)
     try:
         stream.close()
     except Exception:
@@ -97,10 +156,12 @@ def chat(
     on_text: Callable[[str], None] | None = None,
     on_thinking: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    model: str | None = None,
 ) -> LLMResponse:
     """流式请求模型：边收边回调，结束后返回完整文本和工具调用。"""
+    use_model = (model or config.MODEL).strip() or config.MODEL
     kwargs: dict = {
-        "model": config.MODEL,
+        "model": use_model,
         "messages": messages,
         "stream": True,
     }
@@ -111,101 +172,96 @@ def chat(
     if extra:
         kwargs["extra_body"] = extra
 
-    started = time.time()
-    print(
-        f"调用模型 {config.MODEL}  messages={len(messages)} tools={'yes' if tools else 'no'} stream",
-        flush=True,
-    )
-    content_parts: list[str] = []
-    tool_buf: dict[int, dict[str, str]] = {}
-    finish_reason: str | None = None
-    first_token = False
-    stream = None
-    global _active_stream
-    try:
-        stream = client.chat.completions.create(**kwargs)
-        with _active_lock:
-            _active_stream = stream
-        for chunk in stream:
-            if cancel_check and cancel_check():
-                raise RuntimeError("已停止")
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
-            delta = choice.delta
-            if delta is None:
-                continue
-            piece = delta.content or ""
-            if piece:
-                if not first_token:
-                    first_token = True
-                    print(f"首字 {time.time()-started:.1f}s", flush=True)
-                content_parts.append(piece)
-                if on_text:
-                    on_text(piece)
-            thinking = getattr(delta, "reasoning_content", None) or getattr(
-                delta, "reasoning", None
-            )
-            if thinking and on_thinking:
-                on_thinking(thinking)
-            for tc in delta.tool_calls or []:
-                idx = tc.index if getattr(tc, "index", None) is not None else 0
-                slot = tool_buf.setdefault(
-                    idx, {"id": "", "name": "", "arguments": ""}
-                )
-                if tc.id:
-                    slot["id"] = tc.id
-                fn = tc.function
-                if fn is None:
-                    continue
-                if fn.name:
-                    slot["name"] += fn.name
-                if fn.arguments:
-                    slot["arguments"] += fn.arguments
-    except RuntimeError:
-        raise
-    except Exception as exc:
-        if cancel_check and cancel_check():
-            raise RuntimeError("已停止") from exc
-        name = type(exc).__name__
-        print(f"模型失败 {name} {time.time()-started:.1f}s", flush=True)
-        if "Timeout" in name or "ReadTimeout" in name:
-            raise RuntimeError(
-                f"模型请求超时（{int(config.LLM_TIMEOUT)}秒）。请检查网络后重试。"
-            ) from exc
-        if "APIConnection" in name:
-            raise RuntimeError("连不上模型服务，请检查网络和 OPENAI_BASE_URL。") from exc
-        raise
-    finally:
-        with _active_lock:
-            if _active_stream is stream:
-                _active_stream = None
-        if stream is not None:
-            try:
-                stream.close()
-            except Exception:
-                pass
+    emitted = {"v": False}
 
-    tool_calls = [
-        ToolCall(
-            id=slot["id"] or f"call_{idx}",
-            name=slot["name"],
-            arguments=slot["arguments"] or "{}",
+    def _once() -> LLMResponse:
+        content_parts: list[str] = []
+        tool_buf: dict[int, dict[str, str]] = {}
+        finish_reason: str | None = None
+        stream = None
+        global _active_stream
+        try:
+            stream = client.chat.completions.create(**kwargs)
+            with _active_lock:
+                _active_stream = stream
+            for chunk in stream:
+                if cancel_check and cancel_check():
+                    raise RuntimeError("已停止")
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+                delta = choice.delta
+                if delta is None:
+                    continue
+                piece = delta.content or ""
+                if piece:
+                    content_parts.append(piece)
+                    emitted["v"] = True
+                    if on_text:
+                        on_text(piece)
+                thinking = getattr(delta, "reasoning_content", None) or getattr(
+                    delta, "reasoning", None
+                )
+                if thinking and on_thinking:
+                    on_thinking(thinking)
+                for tc in delta.tool_calls or []:
+                    idx = tc.index if getattr(tc, "index", None) is not None else 0
+                    slot = tool_buf.setdefault(
+                        idx, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if tc.id:
+                        slot["id"] = tc.id
+                    fn = tc.function
+                    if fn is None:
+                        continue
+                    if fn.name:
+                        slot["name"] += fn.name
+                        emitted["v"] = True
+                    if fn.arguments:
+                        slot["arguments"] += fn.arguments
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            if cancel_check and cancel_check():
+                raise RuntimeError("已停止") from exc
+            name = type(exc).__name__
+            if emitted["v"]:
+                raise RuntimeError(f"模型输出中断（{name}）。可点重试。") from exc
+            if "Timeout" in name or "ReadTimeout" in name:
+                raise RuntimeError(
+                    f"模型请求超时（{int(config.LLM_TIMEOUT)}秒）。请检查网络后重试。"
+                ) from exc
+            if "APIConnection" in name:
+                raise RuntimeError("连不上模型服务，请检查网络和 OPENAI_BASE_URL。") from exc
+            raise
+        finally:
+            with _active_lock:
+                if _active_stream is stream:
+                    _active_stream = None
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        tool_calls = [
+            ToolCall(
+                id=slot["id"] or f"call_{idx}",
+                name=slot["name"],
+                arguments=slot["arguments"] or "{}",
+            )
+            for idx, slot in sorted(tool_buf.items())
+            if slot["name"]
+        ]
+        return LLMResponse(
+            content="".join(content_parts),
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
         )
-        for idx, slot in sorted(tool_buf.items())
-        if slot["name"]
-    ]
-    print(
-        f"模型返回 {time.time()-started:.1f}s finish={finish_reason} tools={len(tool_calls)}",
-        flush=True,
-    )
-    return LLMResponse(
-        content="".join(content_parts),
-        tool_calls=tool_calls,
-        finish_reason=finish_reason,
-    )
+
+    return call_with_retries(_once, cancel_check=cancel_check)
 
 
 def assistant_message(resp: LLMResponse) -> dict:

@@ -24,28 +24,28 @@ Anaconda 用户：`conda activate agent` 后同样改 `.env`。
 
 ## 运行
 
-桌面窗口（Codex 式：左对话历史、中聊天、右本次改动；默认工作区 `demo_multi`）：
+桌面窗口（Codex 式：左对话历史、中聊天；右侧 Dock 按需打开。默认工作区 `demo_multi`）：
 
 ```text
 python app.py
 ```
 
-- 顶栏可打开文件夹、文件树抽屉、终端抽屉。
+- 左侧是对话和工作区。右侧 Dock 默认收起，顶栏打开改动 / 文件 / 终端 / 浏览器。文件树不显示 `.agent`。输入框旁可切换模型。
 - 左侧：按工作区列出对话；点「新建」开新会话。项目约定和任务队列按工作区共用。
-- 中间：聊天。底部输入任务，Enter 发送，运行中按钮变为停止。
-- 右侧：Agent 读过/改过的文件。点开可看改动历史并回退。点文件会打开预览抽屉，Ctrl+S 保存。
+- 中间：聊天。底部输入任务，Enter 发送，运行中按钮变为停止。点改动里的文件后，中间预览用 `+/-` 显示差异（只读）；从文件树打开才可编辑、Ctrl+S 保存。
+- 右侧「改动」列出改过的文件和历史版本，可回退。历史版本不能保存。
 - 未做完的任务在当前对话里说「继续」。
 - 只起本地服务、用浏览器打开：`python app.py --browser`
 
 命令行仍然可用：
 
 ```text
-python main.py -w demo "实现 multiply 函数，并运行 pytest 直到测试通过"
-python main.py -w demo
-python main.py -w demo --resume
+python main.py -w demo_multi "补全结账并运行 pytest 直到测试通过"
+python main.py -w demo_multi
+python main.py -w demo_multi --resume
 ```
 
-演示用购物车任务见 `DEMO.txt`。录视频前先运行 `python demo_multi/prepare_demo.py`，把实现还原成测试失败的状态。
+录视频或演示前先运行 `python demo_multi/prepare_demo.py`，把购物车实现还原成测试失败的状态。
 
 ## 记忆
 
@@ -60,7 +60,7 @@ python main.py -w demo --resume
 ## 文件各自做什么
 
 - `llm.py`：发请求、解析 tool_calls
-- `tools.py`：本地文件/命令 + 记忆工具
+- `tools.py`：本地文件/命令 + 记忆工具（含 glob/grep、分段阅读、todo、apply_patch）
 - `memory.py`：项目约定、情节、任务队列、多对话落盘
 - `agent.py`：循环、入口召回、结束时写情节和队列
 - `main.py`：命令行入口
