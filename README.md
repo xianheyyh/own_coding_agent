@@ -17,16 +17,8 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-在 `.env` 填写 `OPENAI_API_KEY`。兼容网关可同时设置，例如 DeepSeek：
+复制 `.env.example` 为 `.env`，填写 `OPENAI_API_KEY`。样例已按 DeepSeek 写好网关和模型名。
 
 ```text
-OPENAI_BASE_URL=https://api.deepseek.com
-OPENAI_MODEL=deepseek-v4-flash
-```
-
-```text
-python demo_multi/prepare_demo.py
 python app.py
 ```
-
-默认工作区是 `demo_multi`。命令行：`python main.py -w demo_multi "任务说明"`。
